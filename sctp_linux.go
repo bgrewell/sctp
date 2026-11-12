@@ -53,8 +53,7 @@ func setsockopt(fd int, optname uintptr, optval unsafe.Pointer, optlen uintptr) 
 // when the goroutine's stack moves before the call.
 func getsockopt(fd int, optname uintptr, optval, optlen unsafe.Pointer) (uintptr, uintptr, error) {
 	if runtime.GOARCH == "s390x" {
-		p := uintptr(optlen)
-		optlen = unsafe.Pointer(&p)
+		optlen = unsafe.Pointer(&optlen)
 	}
 	// FIXME: syscall.SYS_GETSOCKOPT is undefined on 386
 	r0, r1, errno := syscall.Syscall6(syscall.SYS_GETSOCKOPT,
