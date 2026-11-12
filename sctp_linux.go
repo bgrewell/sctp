@@ -28,13 +28,17 @@ import (
 	"unsafe"
 )
 
-func setsockopt(fd int, optname, optval, optlen uintptr) (uintptr, uintptr, error) {
+// setsockopt calls setsockopt(2) at level SOL_SCTP. optval is passed as
+// an unsafe.Pointer and converted to uintptr only in the system call's
+// argument list, so the address the kernel reads stays valid when the
+// goroutine's stack moves before the call.
+func setsockopt(fd int, optname uintptr, optval unsafe.Pointer, optlen uintptr) (uintptr, uintptr, error) {
 	// FIXME: syscall.SYS_SETSOCKOPT is undefined on 386
 	r0, r1, errno := syscall.Syscall6(syscall.SYS_SETSOCKOPT,
 		uintptr(fd),
 		SOL_SCTP,
 		optname,
-		optval,
+		uintptr(optval),
 		optlen,
 		0)
 	if errno != 0 {
@@ -43,18 +47,46 @@ func setsockopt(fd int, optname, optval, optlen uintptr) (uintptr, uintptr, erro
 	return r0, r1, nil
 }
 
-func getsockopt(fd int, optname, optval, optlen uintptr) (uintptr, uintptr, error) {
+// getsockopt calls getsockopt(2) at level SOL_SCTP. optval and optlen are
+// passed as unsafe.Pointer and converted to uintptr only in the system
+// call's argument list, so the addresses the kernel writes to stay valid
+// when the goroutine's stack moves before the call.
+func getsockopt(fd int, optname uintptr, optval, optlen unsafe.Pointer) (uintptr, uintptr, error) {
 	if runtime.GOARCH == "s390x" {
-		optlen = uintptr(unsafe.Pointer(&optlen))
+		p := uintptr(optlen)
+		optlen = unsafe.Pointer(&p)
 	}
 	// FIXME: syscall.SYS_GETSOCKOPT is undefined on 386
 	r0, r1, errno := syscall.Syscall6(syscall.SYS_GETSOCKOPT,
 		uintptr(fd),
 		SOL_SCTP,
 		optname,
-		optval,
-		optlen,
+		uintptr(optval),
+		uintptr(optlen),
 		0)
+	if errno != 0 {
+		return r0, r1, errno
+	}
+	return r0, r1, nil
+}
+
+// rawSetsockopt is setsockopt with optval already a uintptr, for the
+// exported SCTPConn.Setsockopt.
+func rawSetsockopt(fd int, optname, optval, optlen uintptr) (uintptr, uintptr, error) {
+	r0, r1, errno := syscall.Syscall6(syscall.SYS_SETSOCKOPT, uintptr(fd), SOL_SCTP, optname, optval, optlen, 0)
+	if errno != 0 {
+		return r0, r1, errno
+	}
+	return r0, r1, nil
+}
+
+// rawGetsockopt is getsockopt with optval and optlen already uintptrs, for
+// the exported SCTPConn.Getsockopt.
+func rawGetsockopt(fd int, optname, optval, optlen uintptr) (uintptr, uintptr, error) {
+	if runtime.GOARCH == "s390x" {
+		optlen = uintptr(unsafe.Pointer(&optlen))
+	}
+	r0, r1, errno := syscall.Syscall6(syscall.SYS_GETSOCKOPT, uintptr(fd), SOL_SCTP, optname, optval, optlen, 0)
 	if errno != 0 {
 		return r0, r1, errno
 	}

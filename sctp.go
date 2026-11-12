@@ -20,6 +20,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -286,7 +287,7 @@ var ntohl = htonl
 // see https://tools.ietf.org/html/rfc4960#page-25
 func setInitOpts(fd int, options InitMsg) error {
 	optlen := unsafe.Sizeof(options)
-	_, _, err := setsockopt(fd, SCTP_INITMSG, uintptr(unsafe.Pointer(&options)), uintptr(optlen))
+	_, _, err := setsockopt(fd, SCTP_INITMSG, unsafe.Pointer(&options), uintptr(optlen))
 	return err
 }
 
@@ -408,13 +409,16 @@ func SCTPConnect(fd int, addr *SCTPAddr) (int, error) {
 		Addrs:   uintptr(uintptr(unsafe.Pointer(&buf[0]))),
 	}
 	optlen := unsafe.Sizeof(param)
-	_, _, err := getsockopt(fd, SCTP_SOCKOPT_CONNECTX3, uintptr(unsafe.Pointer(&param)), uintptr(unsafe.Pointer(&optlen)))
+	_, _, err := getsockopt(fd, SCTP_SOCKOPT_CONNECTX3, unsafe.Pointer(&param), unsafe.Pointer(&optlen))
+	// param.Addrs carries buf's address as a uintptr, which does not keep
+	// buf alive on its own.
+	runtime.KeepAlive(buf)
 	if err == nil {
 		return int(param.AssocID), nil
 	} else if err != syscall.ENOPROTOOPT {
 		return 0, err
 	}
-	r0, _, err := setsockopt(fd, SCTP_SOCKOPT_CONNECTX, uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
+	r0, _, err := setsockopt(fd, SCTP_SOCKOPT_CONNECTX, unsafe.Pointer(&buf[0]), uintptr(len(buf)))
 	return int(r0), err
 }
 
@@ -430,7 +434,7 @@ func SCTPBind(fd int, addr *SCTPAddr, flags int) error {
 	}
 
 	buf := addr.ToRawSockAddrBuf()
-	_, _, err := setsockopt(fd, option, uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
+	_, _, err := setsockopt(fd, option, unsafe.Pointer(&buf[0]), uintptr(len(buf)))
 	return err
 }
 
@@ -517,14 +521,14 @@ func (c *SCTPConn) SubscribeEvents(flags int) error {
 		SenderDry:       se,
 	}
 	optlen := unsafe.Sizeof(param)
-	_, _, err := setsockopt(c.fd(), SCTP_EVENTS, uintptr(unsafe.Pointer(&param)), uintptr(optlen))
+	_, _, err := setsockopt(c.fd(), SCTP_EVENTS, unsafe.Pointer(&param), uintptr(optlen))
 	return err
 }
 
 func (c *SCTPConn) SubscribedEvents() (int, error) {
 	param := EventSubscribe{}
 	optlen := unsafe.Sizeof(param)
-	_, _, err := getsockopt(c.fd(), SCTP_EVENTS, uintptr(unsafe.Pointer(&param)), uintptr(unsafe.Pointer(&optlen)))
+	_, _, err := getsockopt(c.fd(), SCTP_EVENTS, unsafe.Pointer(&param), unsafe.Pointer(&optlen))
 	if err != nil {
 		return 0, err
 	}
@@ -564,20 +568,20 @@ func (c *SCTPConn) SubscribedEvents() (int, error) {
 
 func (c *SCTPConn) SetDefaultSentParam(info *SndRcvInfo) error {
 	optlen := unsafe.Sizeof(*info)
-	_, _, err := setsockopt(c.fd(), SCTP_DEFAULT_SENT_PARAM, uintptr(unsafe.Pointer(info)), uintptr(optlen))
+	_, _, err := setsockopt(c.fd(), SCTP_DEFAULT_SENT_PARAM, unsafe.Pointer(info), uintptr(optlen))
 	return err
 }
 
 func (c *SCTPConn) GetDefaultSentParam() (*SndRcvInfo, error) {
 	info := &SndRcvInfo{}
 	optlen := unsafe.Sizeof(*info)
-	_, _, err := getsockopt(c.fd(), SCTP_DEFAULT_SENT_PARAM, uintptr(unsafe.Pointer(info)), uintptr(unsafe.Pointer(&optlen)))
+	_, _, err := getsockopt(c.fd(), SCTP_DEFAULT_SENT_PARAM, unsafe.Pointer(info), unsafe.Pointer(&optlen))
 	return info, err
 }
 
 func (c *SCTPConn) SetSackTimer(timer *SackTimer) error { // SackTimer
 	optlen := unsafe.Sizeof(*timer)
-	_, _, err := setsockopt(c.fd(), SCTP_DELAYED_SACK, uintptr(unsafe.Pointer(timer)), optlen)
+	_, _, err := setsockopt(c.fd(), SCTP_DELAYED_SACK, unsafe.Pointer(timer), optlen)
 	return err
 }
 
@@ -587,8 +591,8 @@ func (c *SCTPConn) GetSackTimer() (*SackTimer, error) { // SackTimer
 	_, _, err := getsockopt(
 		c.fd(),
 		SCTP_DELAYED_SACK,
-		uintptr(unsafe.Pointer(timer)),
-		uintptr(unsafe.Pointer(&optlen)),
+		unsafe.Pointer(timer),
+		unsafe.Pointer(&optlen),
 	)
 	return timer, err
 }
@@ -599,18 +603,25 @@ func (c *SCTPConn) GetStatus() (*Status, error) { // Status
 	_, _, err := getsockopt(
 		c.fd(),
 		SCTP_STATUS,
-		uintptr(unsafe.Pointer(sctpStatus)),
-		uintptr(unsafe.Pointer(&optlen)),
+		unsafe.Pointer(sctpStatus),
+		unsafe.Pointer(&optlen),
 	)
 	return sctpStatus, err
 }
 
+// Getsockopt calls getsockopt(2) at level SOL_SCTP with optval and optlen
+// as the kernel's arguments. The memory they address must not move before
+// the call returns: a stack address converted to uintptr in the caller can
+// go stale when the goroutine's stack grows.
 func (c *SCTPConn) Getsockopt(optname, optval, optlen uintptr) (uintptr, uintptr, error) {
-	return getsockopt(c.fd(), optname, optval, optlen)
+	return rawGetsockopt(c.fd(), optname, optval, optlen)
 }
 
+// Setsockopt calls setsockopt(2) at level SOL_SCTP with optval and optlen
+// as the kernel's arguments. The memory optval addresses must not move
+// before the call returns (see Getsockopt).
 func (c *SCTPConn) Setsockopt(optname, optval, optlen uintptr) (uintptr, uintptr, error) {
-	return setsockopt(c.fd(), optname, optval, optlen)
+	return rawSetsockopt(c.fd(), optname, optval, optlen)
 }
 
 func resolveFromRawAddr(ptr unsafe.Pointer, n int) (*SCTPAddr, error) {
@@ -659,7 +670,7 @@ func sctpGetAddrs(fd, id, optname int) (*SCTPAddr, error) {
 		assocId: int32(id),
 	}
 	optlen := unsafe.Sizeof(param)
-	_, _, err := getsockopt(fd, uintptr(optname), uintptr(unsafe.Pointer(&param)), uintptr(unsafe.Pointer(&optlen)))
+	_, _, err := getsockopt(fd, uintptr(optname), unsafe.Pointer(&param), unsafe.Pointer(&optlen))
 	if err != nil {
 		return nil, err
 	}
@@ -676,7 +687,7 @@ func (c *SCTPConn) SCTPGetPrimaryPeerAddr() (*SCTPAddr, error) {
 		assocId: int32(0),
 	}
 	optlen := unsafe.Sizeof(param)
-	_, _, err := getsockopt(c.fd(), SCTP_PRIMARY_ADDR, uintptr(unsafe.Pointer(&param)), uintptr(unsafe.Pointer(&optlen)))
+	_, _, err := getsockopt(c.fd(), SCTP_PRIMARY_ADDR, unsafe.Pointer(&param), unsafe.Pointer(&optlen))
 	if err != nil {
 		return nil, err
 	}
@@ -716,7 +727,7 @@ func (c *SCTPConn) PeelOff(id int) (*SCTPConn, error) {
 		assocId: int32(id),
 	}
 	optlen := unsafe.Sizeof(param)
-	_, _, err := getsockopt(c.fd(), SCTP_SOCKOPT_PEELOFF, uintptr(unsafe.Pointer(&param)), uintptr(unsafe.Pointer(&optlen)))
+	_, _, err := getsockopt(c.fd(), SCTP_SOCKOPT_PEELOFF, unsafe.Pointer(&param), unsafe.Pointer(&optlen))
 	if err != nil {
 		return nil, err
 	}
