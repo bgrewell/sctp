@@ -172,13 +172,29 @@ func TestSCTPListenerNameFromFd(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var fln *SCTPListener
-	raw.Control(func(fd uintptr) {
-		fln, err = FileListener(os.NewFile(uintptr(fd), "listener"))
+	// The *os.File gets a duplicate of ln's descriptor and is closed here:
+	// left to its finalizer, it would close ln's descriptor number at a
+	// later GC, when another test may own that number.
+	var f *os.File
+	var cerr error
+	if err := raw.Control(func(fd uintptr) {
+		nfd, err := syscall.Dup(int(fd))
 		if err != nil {
-			t.Fatal(err)
+			cerr = err
+			return
 		}
-	})
+		f = os.NewFile(uintptr(nfd), "listener")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if cerr != nil {
+		t.Fatal(cerr)
+	}
+	defer f.Close()
+	fln, err := FileListener(f)
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer fln.Close()
 
 	fla, ok := fln.Addr().(*SCTPAddr)
